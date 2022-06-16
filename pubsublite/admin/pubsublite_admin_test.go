@@ -35,14 +35,16 @@ import (
 
 const (
 	resourcePrefix = "admin-test-"
-	testRegion     = "us-central1"
+	testRegion     = "us-west1"
 )
 
 var (
-	supportedZones = []string{"us-central1-a", "us-central1-b", "us-central1-c"}
+	supportedZones = []string{"us-west1-a", "us-west1-c"}
 
-	once       sync.Once
-	projNumber string
+	once            sync.Once
+	projNumber      string
+	reservationID   string
+	reservationPath string
 )
 
 func setupAdmin(t *testing.T) *pubsublite.AdminClient {
@@ -70,7 +72,7 @@ func setupAdmin(t *testing.T) *pubsublite.AdminClient {
 
 		projNumber = strconv.FormatInt(project.ProjectNumber, 10)
 
-		psltest.Cleanup(t, client, projNumber, resourcePrefix, supportedZones)
+		psltest.Cleanup(t, client, projNumber, testRegion, resourcePrefix, supportedZones)
 	})
 
 	return client
@@ -84,54 +86,53 @@ func TestTopicAdmin(t *testing.T) {
 	testZone := randomZone()
 
 	topicID := resourcePrefix + uuid.NewString()
-	topicPath := fmt.Sprintf("projects/%s/locations/%s/topics/%s", projNumber, testZone, topicID)
 	t.Run("CreateTopic", func(t *testing.T) {
+		ctx := context.Background()
+		reservationID = resourcePrefix + uuid.NewString()
+		reservationPath = fmt.Sprintf("projects/%s/locations/%s/reservations/%s", projNumber, testRegion, reservationID)
+		client.CreateReservation(ctx, pubsublite.ReservationConfig{
+			Name:               reservationPath,
+			ThroughputCapacity: 4,
+		})
+
 		buf := new(bytes.Buffer)
-		err := createTopic(buf, tc.ProjectID, testRegion, testZone, topicID)
+		err := createTopic(buf, tc.ProjectID, testRegion, testZone, topicID, reservationPath)
 		if err != nil {
 			t.Fatalf("createTopic: %v", err)
 		}
 		got := buf.String()
-		want := fmt.Sprintf("Created topic: %s\n", topicPath)
-		if diff := cmp.Diff(want, got); diff != "" {
-			t.Fatalf("createTopic() mismatch: -want, +got:\n%s", diff)
+		want := "Created topic"
+		if !strings.Contains(got, want) {
+			t.Fatalf("createTopic() mismatch: got: %s\nwant: %s", got, want)
 		}
 	})
 
 	t.Run("GetTopic", func(t *testing.T) {
-		buf := new(bytes.Buffer)
-		err := getTopic(buf, tc.ProjectID, testRegion, testZone, topicID)
-		if err != nil {
-			t.Fatalf("getTopic: %v", err)
-		}
-		got := buf.String()
-		want := fmt.Sprintf("Got topic: %#v\n", *psltest.DefaultTopicConfig(topicPath))
-		if diff := cmp.Diff(want, got); diff != "" {
-			t.Fatalf("getTopic() mismatch: -want, +got:\n%s", diff)
-		}
+		testutil.Retry(t, 3, 5*time.Second, func(r *testutil.R) {
+			buf := new(bytes.Buffer)
+			err := getTopic(buf, tc.ProjectID, testRegion, testZone, topicID)
+			if err != nil {
+				r.Errorf("getTopic: %v", err)
+			}
+			got := buf.String()
+			want := "Got topic"
+			if !strings.Contains(got, want) {
+				r.Errorf("getTopic() mismatch: got: %s\nwant: %s", got, want)
+			}
+		})
 	})
 
 	t.Run("UpdateTopic", func(t *testing.T) {
 		buf := new(bytes.Buffer)
-		err := updateTopic(buf, projNumber, testRegion, testZone, topicID)
+		err := updateTopic(buf, projNumber, testRegion, testZone, topicID, reservationPath)
 		if err != nil {
 			t.Fatalf("updateTopic: %v", err)
 		}
 
 		got := buf.String()
-		// This is hard coded into the pubsublite/update_topic.go sample.
-		// If the sample value changes, this value needs to change as well.
-		wantCfg := &pubsublite.TopicConfig{
-			Name:                       topicPath,
-			PartitionCount:             3,
-			PublishCapacityMiBPerSec:   8,
-			SubscribeCapacityMiBPerSec: 16,
-			PerPartitionBytes:          60 * 1024 * 1024 * 1024,
-			RetentionDuration:          24 * time.Hour,
-		}
-		want := fmt.Sprintf("Updated topic: %#v\n", *wantCfg)
-		if diff := cmp.Diff(want, got); diff != "" {
-			t.Fatalf("updateTopic() mismatch: -want, +got:\n%s", diff)
+		want := "Updated topic"
+		if !strings.Contains(got, want) {
+			t.Fatalf("updateTopic() mismatch: got: %s\nwant: %s", got, want)
 		}
 	})
 
@@ -166,17 +167,19 @@ func TestListTopics(t *testing.T) {
 		psltest.MustCreateTopic(ctx, t, client, topicPath)
 	}
 
-	buf := new(bytes.Buffer)
-	err := listTopics(buf, tc.ProjectID, testRegion, testZone)
-	if err != nil {
-		t.Fatalf("listTopics got err: %v", err)
-	}
-	got := buf.String()
-	for _, tp := range topicPaths {
-		if !strings.Contains(got, tp) {
-			t.Fatalf("missing topic path from list: %s", tp)
+	testutil.Retry(t, 3, 5*time.Second, func(r *testutil.R) {
+		buf := new(bytes.Buffer)
+		err := listTopics(buf, tc.ProjectID, testRegion, testZone)
+		if err != nil {
+			r.Errorf("listTopics got err: %v", err)
 		}
-	}
+		got := buf.String()
+		for _, tp := range topicPaths {
+			if !strings.Contains(got, tp) {
+				r.Errorf("missing topic path from list: %s", tp)
+			}
+		}
+	})
 
 	for _, tp := range topicPaths {
 		client.DeleteTopic(ctx, tp)
@@ -213,16 +216,18 @@ func TestSubscriptionAdmin(t *testing.T) {
 	})
 
 	t.Run("GetSubscription", func(t *testing.T) {
-		buf := new(bytes.Buffer)
-		err := getSubscription(buf, projNumber, testRegion, testZone, subID)
-		if err != nil {
-			t.Fatalf("getSubscription: %v", err)
-		}
-		got := buf.String()
-		want := fmt.Sprintf("Got subscription: %#v\n", psltest.DefaultSubConfig(topicPath, subPath))
-		if diff := cmp.Diff(want, got); diff != "" {
-			t.Fatalf("getSubscription mismatch: -want, +got:\n%s", diff)
-		}
+		testutil.Retry(t, 3, 5*time.Second, func(r *testutil.R) {
+			buf := new(bytes.Buffer)
+			err := getSubscription(buf, projNumber, testRegion, testZone, subID)
+			if err != nil {
+				r.Errorf("getSubscription: %v", err)
+			}
+			got := buf.String()
+			want := fmt.Sprintf("Got subscription: %#v\n", psltest.DefaultSubConfig(topicPath, subPath))
+			if diff := cmp.Diff(want, got); diff != "" {
+				r.Errorf("getSubscription mismatch: -want, +got:\n%s", diff)
+			}
+		})
 	})
 
 	t.Run("UpdateSubscription", func(t *testing.T) {
@@ -242,6 +247,19 @@ func TestSubscriptionAdmin(t *testing.T) {
 		want := fmt.Sprintf("Updated subscription: %#v\n", wantCfg)
 		if diff := cmp.Diff(want, got); diff != "" {
 			t.Fatalf("updateSubscription() mismatch: -want, +got:\n%s", diff)
+		}
+	})
+
+	t.Run("SeekSubscription", func(t *testing.T) {
+		buf := new(bytes.Buffer)
+		err := seekSubscription(buf, projNumber, testRegion, testZone, subID, pubsublite.Beginning, false)
+		if err != nil {
+			t.Fatalf("seekSubscription: %v", err)
+		}
+		got := buf.String()
+		want := "Seek operation initiated"
+		if !strings.Contains(got, want) {
+			t.Fatalf("got: %v, want %v", got, want)
 		}
 	})
 
@@ -281,19 +299,20 @@ func TestListSubscriptions(t *testing.T) {
 		subPaths = append(subPaths, subPath)
 	}
 
-	// Test listSubscriptionsInProject.
 	t.Run("ListSubscriptionsInProject", func(t *testing.T) {
-		buf := new(bytes.Buffer)
-		err := listSubscriptionsInProject(buf, tc.ProjectID, testRegion, testZone)
-		if err != nil {
-			t.Fatalf("listSubscriptionsInProject got err: %v", err)
-		}
-		got := buf.String()
-		for _, sp := range subPaths {
-			if !strings.Contains(got, sp) {
-				t.Fatalf("missing sub path from list: %s", sp)
+		testutil.Retry(t, 3, 5*time.Second, func(r *testutil.R) {
+			buf := new(bytes.Buffer)
+			err := listSubscriptionsInProject(buf, tc.ProjectID, testRegion, testZone)
+			if err != nil {
+				r.Errorf("listSubscriptionsInProject got err: %v", err)
 			}
-		}
+			got := buf.String()
+			for _, sp := range subPaths {
+				if !strings.Contains(got, sp) {
+					r.Errorf("missing sub path from list: %s", sp)
+				}
+			}
+		})
 	})
 
 	// Test listSubscriptionsInTopic with same list of subscriptions.
@@ -314,6 +333,106 @@ func TestListSubscriptions(t *testing.T) {
 	client.DeleteTopic(ctx, topicPath)
 	for _, sp := range subPaths {
 		client.DeleteSubscription(ctx, sp)
+	}
+}
+
+func TestReservationsAdmin(t *testing.T) {
+	t.Parallel()
+	client := setupAdmin(t)
+	defer client.Close()
+	tc := testutil.SystemTest(t)
+
+	reservationID := resourcePrefix + uuid.NewString()
+	resPath := fmt.Sprintf("projects/%s/locations/%s/reservations/%s", projNumber, testRegion, reservationID)
+	cap := 4
+	t.Run("CreateReservation", func(t *testing.T) {
+		buf := new(bytes.Buffer)
+		err := createReservation(buf, tc.ProjectID, testRegion, reservationID, cap)
+		if err != nil {
+			t.Fatalf("createReservation: %v", err)
+		}
+
+		got := buf.String()
+		want := "Created reservation"
+		if !strings.Contains(got, want) {
+			t.Fatalf("createReservation() mismatch: got: %s\nwant: %s", got, want)
+		}
+	})
+
+	t.Run("GetReservation", func(t *testing.T) {
+		buf := new(bytes.Buffer)
+		err := getReservation(buf, tc.ProjectID, testRegion, reservationID)
+		if err != nil {
+			t.Fatalf("getReservation: %v", err)
+		}
+
+		got := buf.String()
+		want := fmt.Sprintf("Got reservation: %#v\n", psltest.DefaultResConfig(resPath))
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Fatalf("getReservation() mismatch: -want, +got:\n%s", diff)
+		}
+	})
+
+	t.Run("UpdateReservation", func(t *testing.T) {
+		buf := new(bytes.Buffer)
+		err := updateReservation(buf, tc.ProjectID, testRegion, reservationID, cap)
+		if err != nil {
+			t.Fatalf("updateReservation: %v", err)
+		}
+
+		got := buf.String()
+		want := "Updated reservation"
+		if !strings.Contains(got, want) {
+			t.Fatalf("updateReservation() mismatch: got: %s\nwant: %s", got, want)
+		}
+	})
+
+	t.Run("DeleteReservation", func(t *testing.T) {
+		buf := new(bytes.Buffer)
+		err := deleteReservation(buf, tc.ProjectID, testRegion, reservationID)
+		if err != nil {
+			t.Fatalf("deleteReservation: %v", err)
+		}
+
+		got := buf.String()
+		want := "Deleted reservation"
+		if got != want {
+			t.Fatalf("got: %v, want %v", got, want)
+		}
+	})
+}
+
+func TestListReservations(t *testing.T) {
+	t.Parallel()
+	client := setupAdmin(t)
+	defer client.Close()
+	tc := testutil.SystemTest(t)
+	ctx := context.Background()
+
+	var resPaths []string
+	for i := 0; i < 3; i++ {
+		resID := resourcePrefix + uuid.NewString()
+		resPath := fmt.Sprintf("projects/%s/locations/%s/reservations/%s", projNumber, testRegion, resID)
+		resPaths = append(resPaths, resPath)
+		psltest.MustCreateReservation(ctx, t, client, resPath)
+	}
+
+	testutil.Retry(t, 3, 5*time.Second, func(r *testutil.R) {
+		buf := new(bytes.Buffer)
+		err := listReservations(buf, tc.ProjectID, testRegion)
+		if err != nil {
+			r.Errorf("listReservations got err: %v", err)
+		}
+		got := buf.String()
+		for _, rp := range resPaths {
+			if !strings.Contains(got, rp) {
+				r.Errorf("missing reservation from list: %s", rp)
+			}
+		}
+	})
+
+	for _, rp := range resPaths {
+		client.DeleteReservation(ctx, rp)
 	}
 }
 

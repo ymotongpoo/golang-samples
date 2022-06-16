@@ -35,6 +35,7 @@ func listSecrets(w io.Writer, parent string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create secretmanager client: %v", err)
 	}
+	defer client.Close()
 
 	// Build the request.
 	req := &secretmanagerpb.ListSecretsRequest{
@@ -50,7 +51,7 @@ func listSecrets(w io.Writer, parent string) error {
 		}
 
 		if err != nil {
-			return fmt.Errorf("failed to list secret versions: %v", err)
+			return fmt.Errorf("failed to list secrets: %v", err)
 		}
 
 		fmt.Fprintf(w, "Found secret %s\n", resp.Name)

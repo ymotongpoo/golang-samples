@@ -54,6 +54,7 @@ var allowList = []string{
 	"**/.gcloudignore",
 	"**/Makefile",
 	".gitignore",
+	"**/.gitkeep",
 
 	// Primarily ML APIs.
 	"**/testdata/**/*.jpg",
@@ -83,6 +84,9 @@ var allowList = []string{
 	"functions/ocr/app/config.json",
 	"functions/slack/config.json",
 
+	// Cloud Functions gen2 picture.
+	"functions/functionsv2/imagemagick/zombie.jpg",
+
 	// Samples that aren't really code. Legacy.
 	"**/appengine/**/*.txt",
 
@@ -110,6 +114,9 @@ var allowList = []string{
 
 	// cloud-run-button configuration
 	"run/**/app.json",
+
+	// pub/sub schemas
+	"pubsub/**/*.avsc",
 }
 
 // Check whether accidental binary files have been checked in.
